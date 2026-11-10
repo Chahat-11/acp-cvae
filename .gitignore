@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+
+# HydrAMP clone, kept for reference only -- not part of our code
+reference/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
