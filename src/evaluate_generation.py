@@ -81,6 +81,10 @@ def main() -> None:
     parser.add_argument("--anticp-dir", type=Path, default=DEFAULT_ANTICP_DIR)
     parser.add_argument("--anticp-python", type=Path, default=DEFAULT_ANTICP_PYTHON)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--threshold", type=float, default=0.9,
+                        help="activity-head threshold for screened sampling")
+    parser.add_argument("--noise", type=float, default=0.5,
+                        help="latent drift for analogue generation")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -97,13 +101,35 @@ def main() -> None:
     model.eval()
     print(f"Checkpoint: {args.checkpoint} (latent {config['latent_dim']})\n")
 
-    _, _, train_df = load_split("train", MAX_LEN)
+    x_train, y_train, train_df = load_split("train", MAX_LEN)
     actives = train_df[train_df["label"] == 1]["sequence"].tolist()
+
+    # Scrambled real actives: identical composition, random order. This is the
+    # sharpest control we have. Dean and Walper used it to show that ordering,
+    # not composition, carries activity -- so anything we generate ought to beat
+    # a shuffled real peptide, and if it does not, we have not learned order.
+    scrambled = []
+    for sequence in actives:
+        letters = list(sequence)
+        rng.shuffle(letters)
+        scrambled.append("".join(letters))
+
+    # analogue mode needs real actives as templates
+    active_mask = (y_train.squeeze(1) == 1)
+    x_actives = x_train[active_mask][:args.n]
+    y_ones = torch.ones(len(x_actives), 1)
 
     sets = {
         "cvae_y1": [decode(r) for r in model.generate(args.n, 1.0, device)],
+        "cvae_y1_screened": [decode(r) for r in
+                             model.generate(args.n, 1.0, device,
+                                            threshold=args.threshold)],
+        "cvae_analogue": [decode(r) for r in
+                          model.generate_analogue(x_actives, y_ones, device,
+                                                  noise=args.noise)],
         "cvae_y0": [decode(r) for r in model.generate(args.n, 0.0, device)],
         "baseline_random": composition_baseline(actives, args.n, rng),
+        "baseline_scrambled": scrambled,
         "real_actives": actives,
     }
 
@@ -129,6 +155,12 @@ def main() -> None:
     by_name = {r["set"]: r for r in rows}
     y1, y0 = by_name["cvae_y1"], by_name["cvae_y0"]
     base = by_name["baseline_random"]
+    scram = by_name["baseline_scrambled"]
+
+    # the best of our three generation modes is what we would actually ship
+    best_mode = max(("cvae_y1", "cvae_y1_screened", "cvae_analogue"),
+                    key=lambda k: by_name[k]["mean_score"])
+    best = by_name[best_mode]
 
     conditioning_gap = y1["mean_score"] - y0["mean_score"]
     baseline_gap = y1["mean_score"] - base["mean_score"]
@@ -152,6 +184,15 @@ def main() -> None:
         print("   Not clearly. Most of the signal may be amino-acid composition alone.")
     else:
         print("   No -- the random baseline scores HIGHER. The model is not adding value.")
+
+    print("\n3. DOES OUR BEST MODE BEAT A SHUFFLED REAL PEPTIDE?")
+    print(f"   best mode: {best_mode}  mean {best['mean_score']:.3f}"
+          f"   vs   scrambled real actives {scram['mean_score']:.3f}"
+          f"   gap {best['mean_score'] - scram['mean_score']:+.3f}")
+    if best["mean_score"] > scram["mean_score"]:
+        print("   Yes. Generated peptides look more active than shuffled real ones.")
+    else:
+        print("   No. Shuffling a real peptide still beats what we generate.")
 
     (OUTPUTS / "evaluation_verdict.json").write_text(json.dumps({
         "checkpoint": args.checkpoint,

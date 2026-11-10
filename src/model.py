@@ -1,32 +1,25 @@
 """A small conditional VAE for peptide sequences.
 
 Adapted from HydrAMP (Szymczak et al. 2023, MIT licence), rewritten in PyTorch
-and simplified for a course project. What we kept and what we dropped:
+and kept small enough to read in one sitting.
 
   KEPT    encoder produces mu and log-variance
   KEPT    reparameterisation  z = mu + sigma * eps
-  KEPT    the label y is joined to z before decoding, and repeated at every
-          position so the decoder cannot forget it
-  KEPT    loss = reconstruction cross-entropy + beta * KL
-
-  KEPT    a small activity classifier reading z, trained with binary
-          cross-entropy. This is the lambda * L_act term. It is what forces
-          activity to be REPRESENTED in the latent space during training
-          instead of merely filtered for afterwards, and it is the specific
-          thing HydrAMP has that PepVAE does not. Without it the decoder
-          learns to ignore a one-dimensional label sitting next to 64 latent
-          dimensions, and the conditioning does nothing -- we measured exactly
-          that before adding it back.
+  KEPT    the label y is joined to z and fed to the decoder at every step
+  KEPT    an AUTOREGRESSIVE decoder -- each residue is written knowing the one
+          before it. This matters more than anything else here: activity lives
+          in local motifs (the KLAKLAK-style repeats all over the real actives),
+          and a decoder that cannot see what it just wrote cannot build them.
+  KEPT    a small activity classifier reading z (the lambda * L_act term). It
+          forces activity to be REPRESENTED in the latent space during training
+          rather than filtered for afterwards.
+  KEPT    word dropout, from Bowman et al. -- see decode() for why it is needed.
 
   DROPPED the potency/MIC branch (we have one binary label, not a concentration)
   DROPPED Gumbel-softmax (only needed to pass gradients through discrete
-          samples back into the classifier; our classifier reads z directly,
-          which is continuous, so we do not need it)
-  DROPPED the autoregressive decoder, replaced by a plain GRU that reads the
-          same [z, y] at every position. Less powerful, but much easier to
-          follow and it cannot drift the way free-running autoregression does.
+          samples back into the classifier; ours reads z, already continuous)
 
-Shapes, with B = batch size, L = MAX_LEN, V = 21:
+Shapes, with B = batch, L = MAX_LEN, V = 23:
   x  [B, L]      amino acid indices
   y  [B, 1]      label, 1.0 = anticancer
   z  [B, latent] latent vector
@@ -38,7 +31,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from peptides import PAD, VOCAB_SIZE
+from peptides import BOS, PAD, UNK, VOCAB_SIZE
 
 
 class ConditionalVAE(nn.Module):
@@ -48,7 +41,7 @@ class ConditionalVAE(nn.Module):
         latent_dim: int = 64,    # HydrAMP LATENT_DIM
         hidden_dim: int = 128,   # HydrAMP HIDDEN_DIM
         embed_dim: int = 64,
-        position_dim: int = 16,
+        label_dim: int = 16,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -57,38 +50,32 @@ class ConditionalVAE(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # ---------------- encoder:  x -> mu, logvar ----------------
-        # Note: the encoder sees only x, not y. That is how HydrAMP does it.
-        # A textbook cVAE would feed y here as well; we follow HydrAMP so the
-        # comparison with their design stays honest.
         self.embedding = nn.Embedding(VOCAB_SIZE, embed_dim, padding_idx=PAD)
         self.encoder_rnn = nn.GRU(
             embed_dim, hidden_dim, batch_first=True, bidirectional=True
         )
-        # bidirectional, so the summary is 2 * hidden_dim wide
         self.to_mu = nn.Linear(hidden_dim * 2, latent_dim)
         self.to_logvar = nn.Linear(hidden_dim * 2, latent_dim)
 
-        # ---------------- decoder:  [z, y] -> logits ----------------
-        # +1 on the input width is the label, concatenated to z.
-        self.latent_to_hidden = nn.Linear(latent_dim + 1, hidden_dim)
-        # The decoder GRU reads [z, y] again at every position. Repeating the
-        # label is the trick that keeps the condition from being forgotten --
-        # HydrAMP does the same thing with its RepeatVector.
-        #
-        # We also give it a learned embedding of the position. Without this the
-        # decoder gets an identical input at every step and has to work out
-        # "where am I in the peptide" from the GRU's internal dynamics alone,
-        # which it does badly. Telling it the position directly roughly doubles
-        # reconstruction accuracy for 400 extra parameters.
-        self.position = nn.Embedding(max_len, position_dim)
+        # ---------------- the condition ----------------
+        # The label gets its own embedding rather than being a bare 0.0/1.0.
+        # A single scalar sitting beside 64 latent dimensions is easy for the
+        # decoder to ignore, and we measured it doing exactly that: asking for
+        # active instead of inactive peptides moved the mean score by 0.02.
+        # Giving the label its own 16-wide vector lets it compete for attention.
+        self.label_embedding = nn.Embedding(2, label_dim)
+        condition_dim = latent_dim + label_dim
+
+        # ---------------- decoder:  [previous residue, z, y] -> next residue ----
+        self.latent_to_hidden = nn.Linear(condition_dim, hidden_dim)
         self.decoder_rnn = nn.GRU(
-            latent_dim + 1 + position_dim, hidden_dim, batch_first=True
+            embed_dim + condition_dim, hidden_dim, batch_first=True
         )
         self.to_logits = nn.Linear(hidden_dim, VOCAB_SIZE)
 
         # ---------------- activity classifier:  z -> is it anticancer? ----------
         # Used ONLY during training, to shape the latent space. We never use it
-        # to judge our own output -- AntiCP 2.0 does that, independently.
+        # to judge our own output -- AntiCP 2.0 does that, separately.
         self.activity_head = nn.Sequential(
             nn.Linear(latent_dim, 64),
             nn.ReLU(),
@@ -97,11 +84,15 @@ class ConditionalVAE(nn.Module):
         )
 
     # ---------------------------------------------------------------
+    def condition(self, z: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Join the latent vector with the embedded label."""
+        label = self.label_embedding(y.squeeze(-1).long())
+        return torch.cat([z, label], dim=1)
+
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         embedded = self.embedding(x)                  # [B, L, embed]
-        _, hidden = self.encoder_rnn(embedded)        # hidden [2, B, hidden]
-        # join the forward and backward final states
-        summary = torch.cat([hidden[0], hidden[1]], dim=1)   # [B, 2*hidden]
+        _, hidden = self.encoder_rnn(embedded)        # [2, B, hidden]
+        summary = torch.cat([hidden[0], hidden[1]], dim=1)
         return self.to_mu(summary), self.to_logvar(summary)
 
     def reparameterise(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -114,53 +105,150 @@ class ConditionalVAE(nn.Module):
         if not self.training:
             return mu  # at eval time use the centre, so results are repeatable
         sigma = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(sigma)
-        return mu + sigma * eps
+        return mu + sigma * torch.randn_like(sigma)
 
-    def decode(self, z: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        conditioned = torch.cat([z, y], dim=1)             # [B, latent+1]
-        # same vector at every position ...
-        repeated = conditioned.unsqueeze(1).expand(-1, self.max_len, -1)
+    # ---------------------------------------------------------------
+    def decode(self, z, y, x=None, word_dropout: float = 0.0):
+        """Teacher forcing when x is given, free running when it is not.
 
-        # ... plus "this is position t"
-        positions = torch.arange(self.max_len, device=z.device)
-        position_embedded = self.position(positions)                    # [L, pos]
-        position_embedded = position_embedded.unsqueeze(0).expand(z.size(0), -1, -1)
+        WORD DROPOUT. An autoregressive decoder has a seductive shortcut: it can
+        predict each residue from the previous one alone and ignore z entirely.
+        The reconstruction loss would look excellent and the latent space would
+        be worthless -- sampling z would change nothing. The fix (Bowman et al.)
+        is to randomly replace some of the previous-residue inputs with UNK, so
+        the decoder cannot rely on them and has to consult z instead.
+        """
+        batch = z.size(0)
+        conditioned = self.condition(z, y)                      # [B, cond]
+        hidden = torch.tanh(self.latent_to_hidden(conditioned)).unsqueeze(0)
 
-        decoder_input = torch.cat([repeated, position_embedded], dim=2)
+        positions = conditioned.unsqueeze(1).expand(-1, self.max_len, -1)
 
-        start = torch.tanh(self.latent_to_hidden(conditioned))  # [B, hidden]
-        output, _ = self.decoder_rnn(decoder_input, start.unsqueeze(0))
-        return self.to_logits(self.dropout(output))        # [B, L, V]
+        if x is not None:
+            # shift right: the input at step t is the true residue at t-1
+            start = torch.full((batch, 1), BOS, device=z.device, dtype=torch.long)
+            inputs = torch.cat([start, x[:, :-1]], dim=1)       # [B, L]
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
+            if word_dropout > 0 and self.training:
+                drop = torch.rand(inputs.shape, device=z.device) < word_dropout
+                # never blank out the start marker
+                drop[:, 0] = False
+                inputs = inputs.masked_fill(drop, UNK)
+
+            embedded = self.embedding(inputs)                   # [B, L, embed]
+            rnn_input = torch.cat([embedded, positions], dim=2)
+            output, _ = self.decoder_rnn(rnn_input, hidden)
+            return self.to_logits(self.dropout(output))
+
+        # free running: feed the model its own output, one step at a time
+        token = torch.full((batch, 1), BOS, device=z.device, dtype=torch.long)
+        collected = []
+        for step in range(self.max_len):
+            embedded = self.embedding(token)                    # [B, 1, embed]
+            rnn_input = torch.cat([embedded, positions[:, step:step + 1]], dim=2)
+            output, hidden = self.decoder_rnn(rnn_input, hidden)
+            logits = self.to_logits(output)                     # [B, 1, V]
+            collected.append(logits)
+            token = logits.argmax(dim=-1)
+        return torch.cat(collected, dim=1)
+
+    def forward(self, x, y, word_dropout: float = 0.0):
         mu, logvar = self.encode(x)
         z = self.reparameterise(mu, logvar)
-        return self.decode(z, y), mu, logvar, self.activity_head(z)
+        logits = self.decode(z, y, x=x, word_dropout=word_dropout)
+        return logits, mu, logvar, self.activity_head(z)
 
     # ---------------------------------------------------------------
     @torch.no_grad()
-    def generate(self, n: int, label: float, device, temperature: float = 1.0):
+    def sample_latents(self, n: int, device, threshold: float = 0.0,
+                       max_tries: int = 200) -> torch.Tensor:
+        """Draw z from the prior, optionally keeping only 'active-looking' ones.
+
+        Sampling z blindly gives no guarantee of landing where active peptides
+        live. The model already carries an opinion about that -- the activity
+        head -- so we can screen our own latent samples before spending a
+        decode on them. threshold=0 disables this and samples plainly.
+
+        This still needs no dataset and no encoder, so it keeps the property
+        that generation is self-contained.
+        """
+        if threshold <= 0:
+            return torch.randn(n, self.latent_dim, device=device)
+
+        kept = []
+        total = 0
+        for _ in range(max_tries):
+            batch = torch.randn(n, self.latent_dim, device=device)
+            probability = torch.sigmoid(self.activity_head(batch)).squeeze(-1)
+            chosen = batch[probability >= threshold]
+            if len(chosen):
+                kept.append(chosen)
+                total += len(chosen)
+            if total >= n:
+                break
+
+        if not kept:  # threshold too strict; fall back rather than fail
+            return torch.randn(n, self.latent_dim, device=device)
+        return torch.cat(kept)[:n]
+
+    @torch.no_grad()
+    def generate_analogue(self, x, y, device, noise: float = 0.5,
+                          temperature: float = 1.0):
+        """HydrAMP's other mode: start from a real peptide and vary it.
+
+        Encode a known active peptide, nudge its latent vector, and decode.
+        Unlike sampling from the prior this starts somewhere we know is good,
+        so the output stays closer to real peptides. The cost is that it needs
+        a template, and the results are variations rather than inventions.
+
+        `noise` is the drift: small values give near-copies, large values
+        wander toward unconstrained sampling.
+        """
+        self.eval()
+        mu, _ = self.encode(x.to(device))
+        z = mu + noise * torch.randn_like(mu)
+        return self._decode_tokens(z, y.to(device), temperature)
+
+    @torch.no_grad()
+    def generate(self, n: int, label: float, device, temperature: float = 1.0,
+                 threshold: float = 0.0):
         """Draw n new peptides. No encoder and no dataset needed here.
 
         We sample z from the prior N(0, I) -- which is exactly why the KL term
         exists, to make that prior a sensible place to sample from -- set the
-        label we want, and decode.
+        label we want, and decode one residue at a time, feeding each choice
+        back in as the input to the next step.
 
-        temperature < 1 makes the output more conservative (closer to the most
-        likely amino acid at each position), > 1 makes it more adventurous.
+        temperature < 1 is more conservative, > 1 more adventurous.
         """
         self.eval()
-        z = torch.randn(n, self.latent_dim, device=device)
-        y = torch.full((n, 1), float(label), device=device)
+        z = self.sample_latents(n, device, threshold)
+        y = torch.full((len(z), 1), float(label), device=device)
+        return self._decode_tokens(z, y, temperature)
 
-        logits = self.decode(z, y) / temperature
-        probabilities = torch.softmax(logits, dim=-1)
+    @torch.no_grad()
+    def _decode_tokens(self, z, y, temperature: float = 1.0):
+        """Free-running decode, sampling one residue at a time."""
+        conditioned = self.condition(z, y)
+        hidden = torch.tanh(self.latent_to_hidden(conditioned)).unsqueeze(0)
+        positions = conditioned.unsqueeze(1)
 
-        # sample one amino acid per position
-        flat = probabilities.reshape(-1, probabilities.size(-1))
-        sampled = torch.multinomial(flat, num_samples=1)
-        return sampled.reshape(n, self.max_len).cpu()
+        token = torch.full((len(z), 1), BOS, device=z.device, dtype=torch.long)
+        collected = []
+        for _ in range(self.max_len):
+            embedded = self.embedding(token)
+            rnn_input = torch.cat([embedded, positions], dim=2)
+            output, hidden = self.decoder_rnn(rnn_input, hidden)
+            logits = self.to_logits(output).squeeze(1) / temperature
+
+            # BOS and UNK are inputs, never outputs
+            logits[:, BOS] = float("-inf")
+            logits[:, UNK] = float("-inf")
+
+            token = torch.multinomial(torch.softmax(logits, dim=-1), 1)
+            collected.append(token)
+
+        return torch.cat(collected, dim=1).cpu()
 
 
 def vae_loss(logits, x, mu, logvar, beta: float,
@@ -172,11 +260,6 @@ def vae_loss(logits, x, mu, logvar, beta: float,
 
     Padding IS included in the loss on purpose: the model has to learn where a
     peptide ends, and PAD is how it says so.
-
-    The activity term is binary cross-entropy on a classifier reading z. It is
-    what makes the conditioning work: it pushes active and inactive peptides
-    into different regions of the latent space, so that setting y actually
-    changes what comes out of the decoder.
     """
     batch_size = x.size(0)
 

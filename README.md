@@ -283,13 +283,24 @@ than `~/Downloads/anticp2`, pass `--anticp-dir`.
 ## Running it
 
 ```bash
-python src/prepare_data.py                                  # clean the data
-python src/train.py --epochs 200 --latent-dim 32 --dropout 0.2 --beta-max 0.2
-python src/generate.py --n 500                              # sample new peptides
-python src/score_with_anticp.py                             # rank them
-python src/evaluate_generation.py --n 400                   # the headline test
-python src/latent_analysis.py                               # PCA + k-means
+python src/prepare_data.py                     # clean the data
+
+python src/train.py --epochs 600 --latent-dim 32 --hidden-dim 256 \
+       --dropout 0.2 --beta-max 0.2 --word-dropout 0.3 --save-as cvae_ar.pt
+
+python src/generate.py --n 600 --threshold 0.99 --checkpoint cvae_ar.pt
+python src/score_with_anticp.py                # rank the shortlist
+python src/evaluate_generation.py --n 400 --checkpoint cvae_ar.pt
+python src/novelty_tradeoff.py                 # novelty vs activity curve
+python src/latent_analysis.py --checkpoint cvae_ar.pt
 ```
+
+Training takes about 6 minutes on an M1/M2.
+
+`--threshold 0.99` turns on **latent screening**: sample `z` from the prior,
+then keep only the ones the model's own activity head rates as confidently
+active, before spending a decode on them. It needs no dataset, so generation
+stays self-contained.
 
 Or open `notebooks/pipeline.ipynb`, which runs all of it with explanations.
 
@@ -297,40 +308,61 @@ Or open `notebooks/pipeline.ipynb`, which runs all of it with explanations.
 
 ## Where it stands
 
-The pipeline works end to end. The peptides it produces are **not yet
-convincing**, and we say so plainly.
+**Final shortlist: 524 novel candidate peptides, 142 of them scoring ≥ 0.8**,
+generated with no template and no dataset at generation time.
 
-Generation is mechanically fine — 92.4% valid, 100% unique, 98.3% novel, zero
-exact copies. But scored by AntiCP 2.0:
+Generation quality — 99.8% valid, 99.7% unique, 87.8% novel, 9 exact copies out
+of 600. Scored by AntiCP 2.0:
 
 | Set | mean score | % ≥ 0.8 |
 |---|---|---|
-| cVAE asked for **active** | 0.577 | 13.8% |
-| cVAE asked for **inactive** | 0.556 | 10.3% |
-| random, same composition | 0.552 | 6.0% |
-| **scrambled real actives** | **0.654** | 30.1% |
+| cVAE asked for **active** | 0.641 | 26.4% |
+| cVAE **active + latent screening** | **0.675** | 34.8% |
+| cVAE asked for **inactive** | 0.522 | 9.8% |
+| random, same composition | 0.552 | 4.3% |
+| scrambled real actives | 0.649 | 29.1% |
 | real actives, unmodified | 0.997 | 100% |
 
-Three things follow:
+**Conditioning works: +0.118** between asking for active and asking for
+inactive.
 
-1. **Conditioning is weak.** Asking for active rather than inactive moves the
-   mean by only +0.020. One label dimension beside 32 latent ones is not enough
-   for the decoder to pay attention to it.
-2. **We barely beat the composition baseline** (+0.024), and we score *below*
-   scrambled real peptides. That is the number to take seriously.
-3. **The evaluator is partly a memory test.** Real actives score 0.997 because
-   they are AntiCP 2.0's own training data. Scramble them — same composition,
-   random order — and they fall to 0.654, yet 71.5% are *still* called active.
-   So on novel sequences AntiCP leans heavily on composition, which compresses
-   the range we are trying to measure differences in.
+### Scoring only the novel peptides
 
-**Latent space:** ARI 0.009, silhouette 0.066 — k-means does not recover the
-activity split. This is not a contradiction with the activity head reaching
-77.3% accuracy: activity *is* linearly decodable from `z`, it simply is not the
-largest axis of variation, so PCA's top components and unsupervised clustering
-do not find it. That is a reportable result, not a bug.
+A high score means nothing if the peptide is a copy. Analogue generation at low
+noise scored 0.834 — but 121 of those 400 outputs were *exact copies* of
+training peptides. So every headline number scores **novel peptides only** (not
+a copy, under 90% 3-mer similarity to any training active):
 
-Every number is in [RUN_LOG.md](RUN_LOG.md), including what failed.
+| mode | novel % | mean (novel only) | candidates ≥ 0.8 |
+|---|---|---|---|
+| prior sampling | 88.3% | 0.614 | 94 |
+| prior + screening 0.9 | 88.3% | 0.635 | 122 |
+| **prior + screening 0.99** | **86.1%** | **0.647** | **131** |
+| analogue, noise 1.6 | 89.8% | 0.633 | 96 |
+
+Even counting only genuinely new peptides, we match scrambled real actives
+(0.649) and clearly beat a composition-matched random baseline (0.552).
+
+### Two caveats we will not hide
+
+**The evaluator is partly a memory test.** Real actives score 0.997 because
+they are AntiCP 2.0's own training data. Scramble them — same composition,
+random order — and they fall to 0.649, yet 74% are *still* called active. On
+novel sequences AntiCP leans heavily on composition.
+
+**Our best candidates are variations, not inventions.** The top of the
+shortlist sits at 0.78–0.89 similarity to training actives — below our novelty
+cutoff, but recognisably related to known motifs (the `FAKKLAKK…` family echoes
+the KLAKLAK peptides in the training set). That is what analogue-style peptide
+design is *for*, but it is not discovery from nothing.
+
+**Latent space:** ARI 0.052, silhouette 0.062, label agreement 61.6%. k-means
+does not recover the activity split, even though activity *is* linearly
+decodable from `z` (the internal activity head reaches 77.6%). Activity simply
+is not the largest axis of variation. That is a reportable result, not a bug.
+
+Every number, including the failures and the earlier non-autoregressive model,
+is in [RUN_LOG.md](RUN_LOG.md).
 
 ## Limitations
 
@@ -340,10 +372,12 @@ Every number is in [RUN_LOG.md](RUN_LOG.md), including what failed.
 4. **Near-duplicates exist** between the published train and test splits (66
    training sequences share ≥90% of their 6-mers with a validation sequence,
    despite zero exact overlap), so held-out numbers read slightly optimistic.
-5. **Reconstruction plateaus at 56%** on held-out peptides. A model that cannot
-   rebuild a peptide it has been shown cannot invent a convincing new one — this
-   is the root cause of the weak results above. The most likely fix is restoring
-   HydrAMP's autoregressive decoder, which we simplified away.
+5. **Free-running reconstruction is 55%** on held-out peptides. Interestingly
+   this barely moved when we rebuilt the decoder (it was 56% before), yet the
+   generated peptides improved a lot — so reconstruction accuracy is a poor
+   proxy for generation quality here.
+6. **The candidates are variations on known motifs**, not novel chemistry. See
+   the caveat above.
 
 ## Layout
 

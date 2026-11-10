@@ -60,8 +60,16 @@ def beta_at(epoch: int, warmup: int, beta_max: float) -> float:
 
 
 def evaluate(model, loader, device, beta, lam):
+    """Teacher-forced metrics, plus the honest free-running one.
+
+    Teacher forcing hands the decoder the true previous residue at every step,
+    so it flatters the model. Free running makes it rely on its own output,
+    which is what actually happens at generation time. We report both, and the
+    free-running number is the one that matters.
+    """
     model.eval()
-    totals = {"loss": 0.0, "rec": 0.0, "kl": 0.0, "acc": 0.0, "act_acc": 0.0}
+    totals = {"loss": 0.0, "rec": 0.0, "kl": 0.0, "acc": 0.0,
+              "free_acc": 0.0, "act_acc": 0.0}
     batches = 0
     with torch.no_grad():
         for x, y in loader:
@@ -69,10 +77,15 @@ def evaluate(model, loader, device, beta, lam):
             logits, mu, logvar, activity = model(x, y)
             loss, rec, kl, _, _ = vae_loss(logits, x, mu, logvar, beta,
                                            activity, y, lam)
+
+            # decode again from the same z, but without the crutch
+            free_logits = model.decode(mu, y, x=None)
+
             totals["loss"] += loss.item()
             totals["rec"] += rec.item()
             totals["kl"] += kl.item()
             totals["acc"] += reconstruction_accuracy(logits, x)
+            totals["free_acc"] += reconstruction_accuracy(free_logits, x)
             totals["act_acc"] += (((activity > 0).float() == y).float().mean().item())
             batches += 1
     return {k: v / batches for k, v in totals.items()}
@@ -92,6 +105,8 @@ def main() -> None:
                         help="epochs with beta=0 before annealing starts")
     parser.add_argument("--lam", type=float, default=5.0,
                         help="weight on the activity classifier (lambda in L_act)")
+    parser.add_argument("--word-dropout", type=float, default=0.3,
+                        help="fraction of previous residues hidden from the decoder")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-as", default="cvae.pt")
     args = parser.parse_args()
@@ -120,8 +135,8 @@ def main() -> None:
 
     history = []
     started = time.time()
-    print(f"{'epoch':>5} {'beta':>6} {'loss':>9} {'rec':>8} {'KL':>7} "
-          f"{'train acc':>10} {'val acc':>8} {'act acc':>8} {'active':>7}")
+    print(f"{'epoch':>5} {'beta':>6} {'loss':>9} {'KL':>7} "
+          f"{'train acc':>10} {'val acc':>8} {'free acc':>9} {'act acc':>8} {'active':>7}")
 
     for epoch in range(1, args.epochs + 1):
         beta = beta_at(epoch, args.warmup, args.beta_max)
@@ -133,7 +148,7 @@ def main() -> None:
 
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
-            logits, mu, logvar, activity = model(x, y)
+            logits, mu, logvar, activity = model(x, y, word_dropout=args.word_dropout)
             loss, rec, kl, kl_per_dim, _ = vae_loss(logits, x, mu, logvar, beta,
                                                     activity, y, args.lam)
 
@@ -167,6 +182,7 @@ def main() -> None:
             "kl": round(train_stats["kl"], 3),
             "train_acc": round(train_stats["acc"], 4),
             "val_acc": round(val_stats["acc"], 4),
+            "val_free_acc": round(val_stats["free_acc"], 4),
             "train_activity_acc": round(train_stats["act_acc"], 4),
             "val_activity_acc": round(val_stats["act_acc"], 4),
             "active_units": active_units,
@@ -174,8 +190,9 @@ def main() -> None:
 
         if epoch % 10 == 0 or epoch == 1:
             print(f"{epoch:>5} {beta:>6.3f} {train_stats['loss']:>9.2f} "
-                  f"{train_stats['rec']:>8.2f} {train_stats['kl']:>7.2f} "
+                  f"{train_stats['kl']:>7.2f} "
                   f"{train_stats['acc']:>9.1%} {val_stats['acc']:>8.1%} "
+                  f"{val_stats['free_acc']:>9.1%} "
                   f"{val_stats['act_acc']:>8.1%} {active_units:>7}")
 
     elapsed = time.time() - started
@@ -183,7 +200,8 @@ def main() -> None:
 
     final = history[-1]
     print(f"Final: train acc {final['train_acc']:.1%}, "
-          f"val acc {final['val_acc']:.1%}, "
+          f"val acc {final['val_acc']:.1%} (teacher-forced), "
+          f"val acc {final['val_free_acc']:.1%} (free-running), "
           f"activity acc {final['val_activity_acc']:.1%}, "
           f"KL {final['kl']:.2f}, active units {final['active_units']}/{args.latent_dim}")
 

@@ -137,6 +137,9 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=500, help="how many to sample")
     parser.add_argument("--checkpoint", default="cvae.pt")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--threshold", type=float, default=0.0,
+                        help="screen latent samples with the activity head "
+                             "(0 = off, 0.9 = only confidently-active regions)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -161,9 +164,11 @@ def main() -> None:
 
     # ---- generate ----
     active = [decode(row) for row in
-              model.generate(args.n, label=1.0, device=device, temperature=args.temperature)]
+              model.generate(args.n, label=1.0, device=device,
+                             temperature=args.temperature, threshold=args.threshold)]
     inactive = [decode(row) for row in
-                model.generate(args.n, label=0.0, device=device, temperature=args.temperature)]
+                model.generate(args.n, label=0.0, device=device,
+                               temperature=args.temperature)]
     baseline = composition_baseline(actives, args.n, rng)
 
     print("RESULTS")

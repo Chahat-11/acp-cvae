@@ -64,6 +64,107 @@ The activity classifier was added back after measuring that conditioning did
 nothing without it. It is the `λ·L_act` term in the literature review's
 equation 8.
 
+## Phase 2 — rebuilding the decoder (this is what fixed it)
+
+The results in Phase 1 below were poor. The diagnosis was the decoder: it was
+non-autoregressive, reading the same `[z, y]` at every position, so it could
+never build the local motifs that carry activity. Four changes:
+
+| Change | Why |
+|---|---|
+| **Autoregressive decoder** | each residue is written knowing the one before it |
+| **Word dropout (0.3)** | an autoregressive decoder can predict each residue from the previous one and ignore `z` entirely. Randomly replacing inputs with UNK forces it to consult `z` |
+| **Label embedding (16-wide)** | a bare 0.0/1.0 scalar beside 32 latent dimensions was being ignored; now it can compete for attention |
+| **Latent screening** | sample `z` from the prior, keep only those the activity head rates as active. Needs no dataset, so generation stays self-contained |
+| **Analogue mode** | HydrAMP's other mode: encode a real active, drift the latent, decode |
+
+600 epochs, latent 32, hidden 256, β=0.2, λ=5, word dropout 0.3, 344 seconds.
+
+Final: train 96.6% (teacher-forced), val 58.7% (teacher-forced),
+**val 55.0% (free-running)**, activity acc 77.6%, KL 26.0, 28/32 active units.
+
+Note that free-running reconstruction (55.0%) barely changed from the old
+model's 56.2%. **Reconstruction was never the problem.** What changed was the
+decoder's ability to produce locally coherent sequences, which is what the
+scoring picks up.
+
+### Results after the rebuild
+
+Scored by AntiCP 2.0, all sets under identical conditions:
+
+| Set | mean | % ≥ 0.5 | % ≥ 0.8 |
+|---|---|---|---|
+| cVAE y=1 (prior) | 0.641 | 71.8% | 26.4% |
+| cVAE y=1, screened | 0.675 | 78.2% | 34.8% |
+| cVAE analogue (noise 0.5) | 0.834 | 90.8% | 66.2% |
+| cVAE y=0 | 0.522 | 49.5% | 9.8% |
+| random, same composition | 0.552 | 63.4% | 4.3% |
+| scrambled real actives | 0.649 | 74.1% | 29.1% |
+| real actives | 0.997 | 100% | 100% |
+
+**Conditioning now works: +0.118** (was +0.020). Asking for active rather than
+inactive peptides measurably changes what comes out.
+
+### The novelty trap, and how we avoided it
+
+The analogue score of 0.834 is **not** a real result. Checking novelty by noise
+level showed why:
+
+| noise | novel % | exact copies | mean similarity |
+|---|---|---|---|
+| 0.3 | 18.9% | **268** | 0.938 |
+| 0.5 | 54.0% | **121** | 0.757 |
+| 0.8 | 74.8% | 30 | 0.594 |
+| 1.2 | 86.9% | 5 | 0.520 |
+| 2.0 | 91.2% | 1 | 0.458 |
+
+At noise 0.5, 121 of the 400 outputs were **exact copies of training peptides**.
+The high score was memorisation.
+
+So every number below scores **novel peptides only** — not an exact copy, and
+under 90% 3-mer similarity to any training active:
+
+| noise | novel | novel % | mean (novel only) | ≥ 0.8 | usable |
+|---|---|---|---|---|---|
+| 0.3 | 84 | 21.6% | 0.756 | 46.4% | 39 |
+| 0.5 | 214 | 53.9% | 0.697 | 37.4% | 80 |
+| 0.8 | 308 | 77.8% | 0.650 | 30.5% | 94 |
+| 1.2 | 336 | 86.6% | 0.628 | 26.2% | 88 |
+| **1.6** | **342** | **89.8%** | 0.633 | 28.1% | **96** |
+| 2.0 | 340 | 90.2% | 0.616 | 22.4% | 76 |
+
+And for prior sampling, which needs no template at all:
+
+| mode | novel | novel % | mean (novel only) | ≥ 0.8 | usable |
+|---|---|---|---|---|---|
+| prior, y=1 | 529 | 88.3% | 0.614 | 17.8% | 94 |
+| prior, screened 0.9 | 527 | 88.3% | 0.635 | 23.1% | 122 |
+| **prior, screened 0.99** | **515** | **86.1%** | **0.647** | 25.4% | **131** |
+
+**Where this lands.** Screened prior sampling produces peptides that are 86%
+novel and score 0.647 on the novel ones — matching scrambled real peptides
+(0.649) and clearly beating a composition-matched random baseline (0.552). The
+final shortlist is **524 novel candidates, 142 scoring ≥ 0.8**, generated with
+no template and no dataset at generation time.
+
+Honest caveat: the top candidates sit at 0.78–0.89 similarity to training
+actives. They are below our novelty cutoff but are recognisably variations on
+known motifs — the `FAKKLAKK…` family is clearly related to the KLAKLAK
+peptides in the training set. That is reasonable for peptide design and it is
+what analogue-style generation is *for*, but it should not be described as
+inventing something unprecedented.
+
+### Latent space, after the rebuild
+
+ARI 0.052 (was 0.009), silhouette 0.062, label agreement 61.6% (was 55.1%).
+Better, still weak. Activity remains linearly decodable from `z` (the activity
+head reaches 77.6%) without being the dominant axis of variation, so k-means
+does not recover it.
+
+---
+
+## Phase 1 — the original non-autoregressive model (kept for the record)
+
 ## Generation and evaluation
 
 500 sampled with y=1: **92.4% valid, 100% unique, 98.3% novel, 0 exact copies**.

@@ -5,8 +5,12 @@ we map each amino acid to an integer, and pad every sequence to the same length.
 
   index 0      = PAD (empty position, used to fill short peptides)
   index 1..20  = the twenty standard amino acids
+  index 21     = BOS, the "start of peptide" marker
+  index 22     = UNK, used only by word dropout during training
 
-So the vocabulary has 21 symbols. This matches HydrAMP's VOCAB_PAD_SIZE = 21.
+BOS and UNK exist because the decoder is autoregressive: it writes one residue
+at a time, and each step is fed the residue before it. The first step has no
+previous residue, so it gets BOS instead. UNK is explained in model.py.
 """
 
 from __future__ import annotations
@@ -19,7 +23,9 @@ import torch
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 
 PAD = 0
-VOCAB_SIZE = len(AMINO_ACIDS) + 1  # 21
+BOS = len(AMINO_ACIDS) + 1  # 21
+UNK = len(AMINO_ACIDS) + 2  # 22
+VOCAB_SIZE = len(AMINO_ACIDS) + 3  # 23
 
 # Maximum peptide length the model handles. HydrAMP uses 25 and we follow them.
 # Peptides longer than this are DROPPED, not cut short: a truncated anticancer

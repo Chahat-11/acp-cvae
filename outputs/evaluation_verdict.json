@@ -1,37 +1,67 @@
 {
-  "checkpoint": "cvae.pt",
-  "conditioning_gap": 0.0202,
-  "baseline_gap": 0.0245,
+  "checkpoint": "cvae_ar.pt",
+  "conditioning_gap": 0.1182,
+  "baseline_gap": 0.0887,
   "summary": [
     {
       "set": "cvae_y1",
-      "n_scored": 399,
-      "mean_score": 0.5765,
-      "median_score": 0.56,
-      "pct_active_0.5": 62.7,
-      "pct_strong_0.8": 13.8,
+      "n_scored": 397,
+      "mean_score": 0.6407,
+      "median_score": 0.62,
+      "pct_active_0.5": 71.8,
+      "pct_strong_0.8": 26.4,
       "mean_charge": 3.38,
-      "mean_hydrophobicity": 0.24
+      "mean_hydrophobicity": 0.35
+    },
+    {
+      "set": "cvae_y1_screened",
+      "n_scored": 399,
+      "mean_score": 0.6754,
+      "median_score": 0.66,
+      "pct_active_0.5": 78.2,
+      "pct_strong_0.8": 34.8,
+      "mean_charge": 3.41,
+      "mean_hydrophobicity": 0.38
+    },
+    {
+      "set": "cvae_analogue",
+      "n_scored": 400,
+      "mean_score": 0.8335,
+      "median_score": 0.94,
+      "pct_active_0.5": 90.8,
+      "pct_strong_0.8": 66.2,
+      "mean_charge": 3.29,
+      "mean_hydrophobicity": 0.27
     },
     {
       "set": "cvae_y0",
-      "n_scored": 398,
-      "mean_score": 0.5563,
-      "median_score": 0.54,
-      "pct_active_0.5": 60.6,
-      "pct_strong_0.8": 10.3,
-      "mean_charge": 2.98,
-      "mean_hydrophobicity": 0.25
+      "n_scored": 400,
+      "mean_score": 0.5225,
+      "median_score": 0.49,
+      "pct_active_0.5": 49.5,
+      "pct_strong_0.8": 9.8,
+      "mean_charge": 3.26,
+      "mean_hydrophobicity": 0.18
     },
     {
       "set": "baseline_random",
-      "n_scored": 397,
+      "n_scored": 393,
       "mean_score": 0.552,
       "median_score": 0.55,
-      "pct_active_0.5": 64.2,
-      "pct_strong_0.8": 6.0,
-      "mean_charge": 3.34,
-      "mean_hydrophobicity": 0.28
+      "pct_active_0.5": 63.4,
+      "pct_strong_0.8": 4.3,
+      "mean_charge": 3.33,
+      "mean_hydrophobicity": 0.32
+    },
+    {
+      "set": "baseline_scrambled",
+      "n_scored": 499,
+      "mean_score": 0.6488,
+      "median_score": 0.61,
+      "pct_active_0.5": 74.1,
+      "pct_strong_0.8": 29.1,
+      "mean_charge": 3.41,
+      "mean_hydrophobicity": 0.27
     },
     {
       "set": "real_actives",
