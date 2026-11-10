@@ -1,0 +1,47 @@
+{
+  "checkpoint": "cvae.pt",
+  "conditioning_gap": 0.0202,
+  "baseline_gap": 0.0245,
+  "summary": [
+    {
+      "set": "cvae_y1",
+      "n_scored": 399,
+      "mean_score": 0.5765,
+      "median_score": 0.56,
+      "pct_active_0.5": 62.7,
+      "pct_strong_0.8": 13.8,
+      "mean_charge": 3.38,
+      "mean_hydrophobicity": 0.24
+    },
+    {
+      "set": "cvae_y0",
+      "n_scored": 398,
+      "mean_score": 0.5563,
+      "median_score": 0.54,
+      "pct_active_0.5": 60.6,
+      "pct_strong_0.8": 10.3,
+      "mean_charge": 2.98,
+      "mean_hydrophobicity": 0.25
+    },
+    {
+      "set": "baseline_random",
+      "n_scored": 397,
+      "mean_score": 0.552,
+      "median_score": 0.55,
+      "pct_active_0.5": 64.2,
+      "pct_strong_0.8": 6.0,
+      "mean_charge": 3.34,
+      "mean_hydrophobicity": 0.28
+    },
+    {
+      "set": "real_actives",
+      "n_scored": 499,
+      "mean_score": 0.9965,
+      "median_score": 1.0,
+      "pct_active_0.5": 100.0,
+      "pct_strong_0.8": 100.0,
+      "mean_charge": 3.41,
+      "mean_hydrophobicity": 0.27
+    }
+  ]
+}

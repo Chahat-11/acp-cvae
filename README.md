@@ -23,7 +23,13 @@ Scope is deliberately small: the point is to understand every part of it.
 
 ## Status
 
-Data stage is finished and verified. The model is not built yet.
+Data, model, generation, scoring and latent analysis all run end to end.
+
+The honest summary: the pipeline works, but the generated peptides are not yet
+convincing. The cVAE beats a random composition-matched baseline by only +0.024
+mean AntiCP score, and scores *below* scrambled real peptides. Reconstruction
+plateaus at 56% on held-out data. See [RUN_LOG.md](RUN_LOG.md) for every number
+and [the limitations](#limitations).
 
 ## Setup
 
@@ -66,14 +72,33 @@ problem. Accepted length is 5–50 residues; anything longer is truncated to 50.
 
 Model `-m 1` is the ACP-vs-AMP model, which matches the dataset we use.
 
-## Running the data step
+## Running it
 
 ```bash
-python src/prepare_data.py
+python src/prepare_data.py                                  # clean the data
+python src/train.py --epochs 200 --latent-dim 32 --dropout 0.2 --beta-max 0.2
+python src/generate.py --n 500                              # sample new peptides
+python src/score_with_anticp.py                             # rank them
+python src/evaluate_generation.py --n 400                   # the headline test
+python src/latent_analysis.py                               # PCA + k-means
 ```
 
-Reads the four raw files, writes `data/processed/{train,val,train_pos_only}.csv`
-and `outputs/length_hist.png`, and prints a full report of what it dropped.
+Or open `notebooks/pipeline.ipynb`, which runs all of it with explanations.
+
+## Limitations
+
+Worth stating plainly in the report:
+
+1. **No wet-lab validation.** These are computational candidates, not drugs.
+2. **The evaluator is not independent.** AntiCP 2.0 was trained on this dataset.
+   Real actives score 0.997 from it; scrambling them (same composition, random
+   order) drops them to 0.654, but 71.5% are *still* called active. So for novel
+   sequences it is substantially composition-driven.
+3. **The training set is small** — 502 active peptides after the length cap.
+4. **Near-duplicates exist** between the published train and test splits, so
+   held-out numbers read slightly optimistic.
+5. **Conditioning is weak.** Asking for active peptides rather than inactive
+   ones shifts the mean score by only +0.020.
 
 ## Data
 

@@ -1,0 +1,5 @@
+set,n_scored,mean_score,median_score,pct_active_0.5,pct_strong_0.8,mean_charge,mean_hydrophobicity
+cvae_y1,399,0.5765,0.56,62.7,13.8,3.38,0.24
+cvae_y0,398,0.5563,0.54,60.6,10.3,2.98,0.25
+baseline_random,397,0.552,0.55,64.2,6.0,3.34,0.28
+real_actives,499,0.9965,1.0,100.0,100.0,3.41,0.27

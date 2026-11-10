@@ -1,0 +1,5 @@
+set,generated,valid,valid_pct,unique,unique_pct,exact_copies,novel,novel_pct,mean_similarity_to_train,mean_length,mean_charge,mean_hydrophobicity
+"cVAE (y=1, active)",500,462,92.4,462,100.0,0,454,98.3,0.359,16.4,2.66,0.37
+"cVAE (y=0, inactive)",500,436,87.2,436,100.0,0,430,98.6,0.314,16.4,2.46,0.15
+composition baseline,500,497,99.4,497,100.0,0,494,99.4,0.312,15.7,3.34,0.27
+real training actives,502,499,99.4,499,100.0,499,0,0.0,1.0,15.9,3.41,0.27

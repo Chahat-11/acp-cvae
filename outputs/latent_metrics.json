@@ -1,0 +1,10 @@
+{
+  "split": "train",
+  "n_peptides": 851,
+  "latent_dim": 32,
+  "pc1_variance": 0.092,
+  "pc2_variance": 0.0768,
+  "adjusted_rand_index": 0.0093,
+  "silhouette": 0.0658,
+  "label_agreement": 0.5511
+}
